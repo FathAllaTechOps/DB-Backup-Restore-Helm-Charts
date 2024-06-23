@@ -1,0 +1,49 @@
+serviceAccount:
+  enabled: true
+  name: s3-backup-sa
+  annotations: # Add any required annotations here
+    eks.amazonaws.com/role-arn: <Role ARN>
+
+bucket:
+  name: <Bucket Name>
+  prefix: "mysql-backups" 
+  region: "eu-west-1" # Specify the bucket region
+
+database:
+  type: "MySQL" # Specify the database type
+  host: <Host_URL>
+  port: 3306
+  name: <Database_Name>
+  username: <Username> # Specify the MySQL username
+  secretName: <Secret_Name>
+  version: "8" # Specify the MySQL version (e.g., "5.7" or "8")
+
+backup:
+  schedule: "0 7 * * *" # Cron schedule for the backup job
+
+notifications:
+  enabled: true
+  method: teams
+  teamsWebhookUrl: <Webhook URL>
+
+project:
+  name: <Project Name> # Add your project name here
+
+confluence:
+  enabled: true
+  pageTitle: <Page Title>
+  pageId: <Page ID>
+  confluenceUrl: <Confluence URL>
+
+volumes:
+  - name: confluence-access-token
+    secret:
+      secretName: confluence-access-token
+      items:
+        - key: token
+          path: access-token
+
+volumeMounts:
+  - name: confluence-access-token
+    mountPath: /etc/confluence
+    readOnly: true

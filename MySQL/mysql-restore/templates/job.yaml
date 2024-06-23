@@ -1,0 +1,137 @@
+apiVersion: batch/v1
+kind: Job
+metadata:
+  name: mysql-restore
+spec:
+  template:
+    spec:
+      {{- if .Values.serviceAccount.enabled }}
+      serviceAccountName: {{ .Values.serviceAccount.name }}
+      {{- end }}
+      containers:
+        - name: restore
+          image: mysql:8.0.37-debian
+          env:
+            - name: MYSQL_HOST
+              value: {{ .Values.database.host }}
+            - name: MYSQL_PORT
+              value: "{{ .Values.database.port }}"
+            - name: MYSQL_DB
+              value: {{ .Values.database.name }}
+            - name: MYSQL_USERNAME
+              value: {{ .Values.database.username }}
+            - name: MYSQL_PASSWORD
+              valueFrom:
+                secretKeyRef:
+                  name: {{ .Values.database.secretName }}
+                  key: mysql-password
+            - name: BUCKET_NAME
+              value: {{ .Values.bucket.name }}
+            - name: BUCKET_PREFIX
+              value: {{ .Values.bucket.prefix }}
+            - name: BUCKET_REGION
+              value: {{ .Values.bucket.region }}
+            - name: BUCKET_FILE
+              value: {{ .Values.bucket.file }}
+            - name: NAMESPACE_NAME
+              valueFrom:
+                fieldRef:
+                  fieldPath: metadata.namespace
+            - name: TEAMS_WEBHOOK_URL
+              value: {{ .Values.notifications.teamsWebhookUrl }}
+            - name: PROJECT_NAME
+              value: {{ .Values.project.name | default "" | quote }}
+            - name: CONFLUENCE_ENABLED
+              value: {{ .Values.confluence.enabled | default "false" | quote }}
+            - name: CONFLUENCE_PAGE_TITLE
+              value: {{ .Values.confluence.pageTitle | quote }}
+            - name: CONFLUENCE_PAGE_ID
+              value: {{ .Values.confluence.pageId | quote }}
+            - name: CONFLUENCE_URL
+              value: {{ .Values.confluence.confluenceUrl | quote }}
+          command: ["/bin/sh"]
+          args:
+            - "-c"
+            - |
+              apt-get update && apt-get install -y curl awscli jq
+              BACKUP_FILE="/backup/${BUCKET_FILE}"
+              mkdir -p /backup
+              aws s3 cp s3://$BUCKET_NAME/$BUCKET_PREFIX/$(basename $BACKUP_FILE) $BACKUP_FILE --region $BUCKET_REGION
+              if [ $? -eq 0 ]; then
+                mysql -h $MYSQL_HOST -P $MYSQL_PORT -u $MYSQL_USERNAME -p$MYSQL_PASSWORD -e "DROP DATABASE IF EXISTS ${MYSQL_DB};"
+                mysql -h $MYSQL_HOST -P $MYSQL_PORT -u $MYSQL_USERNAME -p$MYSQL_PASSWORD -e "CREATE DATABASE ${MYSQL_DB};"
+                if [ $? -eq 0 ]; then
+                  mysql -h $MYSQL_HOST -P $MYSQL_PORT -u $MYSQL_USERNAME -p$MYSQL_PASSWORD ${MYSQL_DB} < $BACKUP_FILE
+                  if [ $? -eq 0 ]; then
+                    STATUS="Restore succeeded"
+                    COLOR="00FF00" # Green for success
+                  else
+                    STATUS="Restore failed during execution"
+                    COLOR="FF0000" # Red for failure
+                  fi
+                else
+                  STATUS="Database creation failed"
+                  COLOR="FF0000" # Red for failure
+                fi
+              else
+                STATUS="Restore failed during download"
+                COLOR="FF0000" # Red for failure
+              fi
+
+              TIMESTAMP=$(date +'%Y-%m-%d %H:%M:%S %Z')
+
+              if [ "{{ .Values.notifications.enabled }}" = "true" ]; then
+                if [ "{{ .Values.notifications.method }}" = "teams" ]; then
+                  TITLE="${DATABASE_TYPE:+$DATABASE_TYPE }Restore Status${PROJECT_NAME:+ for $PROJECT_NAME}"
+                  CARD="{\"@type\": \"MessageCard\", \"@context\": \"https://schema.org/extensions\", \"themeColor\": \"${COLOR}\", \"summary\": \"Restore Notification\", \"sections\": [{\"activityTitle\": \"$TITLE\", \"facts\": [{\"name\": \"Status:\", \"value\": \"${STATUS}\"}, {\"name\": \"Database:\", \"value\": \"${MYSQL_DB}\"}, {\"name\": \"Namespace:\", \"value\": \"${NAMESPACE_NAME}\"}, {\"name\": \"Backup File:\", \"value\": \"s3://$BUCKET_NAME/$BUCKET_PREFIX/$(basename $BACKUP_FILE)\"}, {\"name\": \"Timestamp:\", \"value\": \"${TIMESTAMP}\"}], \"markdown\": true}]}"
+                  curl -H 'Content-Type: application/json' -d "$CARD" $TEAMS_WEBHOOK_URL
+                fi
+              fi
+
+
+              if [ "$CONFLUENCE_ENABLED" = "true" ]; then
+                if [ "$STATUS" = "Restore failed during execution" ] || [ "$STATUS" = "Database creation failed" ] || [ "$STATUS" = "Restore failed during download" ] ; then
+                  CONFLUENCE_ACCESS_TOKEN=$(cat /etc/confluence/access-token)
+                  CONFLUENCE_PAGE_CONTENT=$(curl -s -H "Authorization: Bearer $CONFLUENCE_ACCESS_TOKEN" -H "X-Atlassian-Token: no-check" "$CONFLUENCE_URL/$CONFLUENCE_PAGE_ID?expand=body.storage,version")
+                  PAGE_VERSION=$(echo $CONFLUENCE_PAGE_CONTENT | jq -r '.version.number')
+                  NEW_VERSION=$((PAGE_VERSION + 1))
+                  BODY_STORAGE=$(echo $CONFLUENCE_PAGE_CONTENT | jq -r '.body.storage.value')
+
+                  NEW_ROW="<tr><td>${STATUS}</td><td>${MYSQL_DB}</td><td>${NAMESPACE_NAME}</td><td>${BACKUP_FILE}</td><td>s3://${BUCKET_NAME}/${BUCKET_PREFIX}/$(basename ${BACKUP_FILE})</td><td>${BACKUP_SIZE} bytes (${BACKUP_SIZE_MB} MB)</td><td>${TIMESTAMP}</td><td></td></tr>"
+
+                  # Check if tbody exists and append the new row appropriately
+                  if echo "$BODY_STORAGE" | grep -q "</tbody>"; then
+                      NEW_BODY_STORAGE=$(echo "$BODY_STORAGE" | sed "s|</tbody>|${NEW_ROW}</tbody>|")
+                  else
+                      NEW_BODY_STORAGE=$(echo "$BODY_STORAGE" | sed "s|</thead>|</thead><tbody>${NEW_ROW}</tbody>|")
+                  fi
+                  NEW_BODY_STORAGE=$(echo $BODY_STORAGE | sed "s|</tbody>|${NEW_ROW}</tbody>|")
+
+                  UPDATE_PAYLOAD=$(jq -n --arg title "$CONFLUENCE_PAGE_TITLE" --arg body "$NEW_BODY_STORAGE" --argjson version "$NEW_VERSION" '{type: "page", title: $title, version: {number: $version}, body: {storage: {value: $body, representation: "storage"}}}')
+                  curl -X PUT -H "Content-Type: application/json" -H "Authorization: Bearer $CONFLUENCE_ACCESS_TOKEN" -H "X-Atlassian-Token: no-check" --data "$UPDATE_PAYLOAD" "${CONFLUENCE_URL}/${CONFLUENCE_PAGE_ID}"
+                fi
+              fi
+          volumeMounts:
+            {{- range .Values.volumeMounts }}
+            - name: {{ .name }}
+              mountPath: {{ .mountPath }}
+              {{- if .readOnly }}
+              readOnly: {{ .readOnly }}
+              {{- end }}
+            {{- end }}
+      restartPolicy: OnFailure
+      volumes:
+        {{- range .Values.volumes }}
+        - name: {{ .name }}
+          {{- if .secret }}
+          secret:
+            secretName: {{ .secret.secretName }}
+            {{- if .secret.items }}
+            items:
+              {{- range .secret.items }}
+              - key: {{ .key }}
+                path: {{ .path }}
+              {{- end }}
+            {{- end }}
+          {{- end }}
+        {{- end }}

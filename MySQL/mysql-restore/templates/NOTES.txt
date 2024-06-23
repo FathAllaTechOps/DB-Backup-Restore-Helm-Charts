@@ -1,0 +1,10 @@
+1. The MySQL restore job has been successfully deployed.
+
+2. To check the status of the restore job, use the following command:
+   kubectl get job mysql-restore -n {{ .Release.Namespace }}
+
+3. To view the logs of the restore job, use the following command:
+   kubectl logs -l job-name=mysql-restore -n {{ .Release.Namespace }}
+
+4. Ensure that the ServiceAccount has the necessary permissions to access the S3 bucket. The role ARN used is:
+   {{ index .Values.serviceAccount.annotations "eks.amazonaws.com/role-arn" }}

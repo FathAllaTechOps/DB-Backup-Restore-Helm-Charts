@@ -1,0 +1,8 @@
+apiVersion: v2
+name: mysql-restore-chart
+description: A Helm chart to create a job for MySQL database restore
+version: 0.1.0
+appVersion: "1.0"
+maintainers:
+  - name: FathAlla Ebrahem
+    email: fathalla.ebrahem22@gmail.com
